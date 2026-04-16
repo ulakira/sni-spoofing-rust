@@ -1,0 +1,26 @@
+name: Build for OpenWrt
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-musleabihf
+
+      - name: Install Cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build Binary
+        run: cross build --release --target armv7-unknown-linux-musleabihf
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sni-spoof-rs-google-wifi
+          path: target/armv7-unknown-linux-musleabihf/release/sni-spoof-rs
