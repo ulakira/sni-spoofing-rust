@@ -27,6 +27,11 @@ jobs:
             name: sni-spoof-rs-linux-arm64
             ui_name: ""
             xray_asset: ""
+          - target: mips-unknown-linux-musl
+            os: ubuntu-latest
+            name: sni-spoof-rs-openwrt-mips
+            ui_name: ""
+            xray_asset: ""
           - target: x86_64-apple-darwin
             os: macos-latest
             name: sni-spoof-rs-macos-amd64
@@ -46,7 +51,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -61,7 +66,7 @@ jobs:
           update: true
           install: mingw-w64-x86_64-gcc
 
-      - name: Install cross-compilation tools
+      - name: Install cross-compilation tools (aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
@@ -69,7 +74,7 @@ jobs:
           echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
 
-      - name: Install MIPS cross-compilation tools
+      - name: Install cross-compilation tools (MIPS OpenWrt / Google WiFi 1304AC)
         if: matrix.target == 'mips-unknown-linux-musl'
         run: |
           sudo apt-get update -qq
@@ -151,7 +156,7 @@ jobs:
           Copy-Item $xrayFile.FullName dist/${{ matrix.name }}/
           Compress-Archive -Path dist/${{ matrix.name }}/* -DestinationPath dist/${{ matrix.name }}.zip
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: dist/*
@@ -162,11 +167,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
@@ -184,6 +189,7 @@ jobs:
           mkdir -p releases
           cp dist/sni-spoof-rs-linux-amd64 releases/
           cp dist/sni-spoof-rs-linux-arm64 releases/
+          cp dist/sni-spoof-rs-openwrt-mips releases/
           cp dist/sni-spoof-rs-macos-amd64 releases/
           cp dist/sni-spoof-rs-macos-arm64 releases/
           cp dist/sni-spoof-rs-windows-amd64.zip releases/
@@ -193,7 +199,7 @@ jobs:
           cp dist/sni-spoof-rs-ui-linux-amd64-bundle.tar.gz releases/ || true
           cp dist/sni-spoof-rs-ui-macos-amd64-bundle.tar.gz releases/ || true
           cp dist/sni-spoof-rs-ui-macos-arm64-bundle.tar.gz releases/ || true
-          chmod +x releases/sni-spoof-rs-linux-* releases/sni-spoof-rs-macos-*
+          chmod +x releases/sni-spoof-rs-linux-* releases/sni-spoof-rs-macos-* releases/sni-spoof-rs-openwrt-*
           chmod +x releases/sni-spoof-rs-ui-* || true
           TAG="${GITHUB_REF#refs/tags/}"
           sed -i "s/Current version: \*\*v[0-9.]*\*\*/Current version: **${TAG}**/" releases/README.md || true
