@@ -69,6 +69,15 @@ jobs:
           echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
 
+      - name: Install MIPS cross-compilation tools
+        if: matrix.target == 'mips-unknown-linux-musl'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-mips-linux-gnu musl-tools
+          rustup target add mips-unknown-linux-musl
+          echo '[target.mips-unknown-linux-musl]' >> ~/.cargo/config.toml
+          echo 'linker = "mips-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
       - name: Install Linux UI dependencies
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
