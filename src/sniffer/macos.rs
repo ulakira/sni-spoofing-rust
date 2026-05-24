@@ -5,11 +5,12 @@ use std::os::fd::RawFd;
 
 use tracing::info;
 
-use crate::error::SnifferError;
 use super::RawBackend;
+use crate::error::SnifferError;
 
 pub struct BpfBackend {
     fd: RawFd,
+    frame_kind: crate::packet::FrameKind,
     buf_len: usize,
     read_buf: Vec<u8>,
     read_pos: usize,
@@ -20,8 +21,14 @@ const BIOCSETIF: libc::c_ulong = 0x8020426C;
 const BIOCIMMEDIATE: libc::c_ulong = 0x80044270;
 const BIOCSHDRCMPLT: libc::c_ulong = 0x80044275;
 const BIOCGBLEN: libc::c_ulong = 0x40044266;
+const BIOCGDLT: libc::c_ulong = 0x4004426A;
 const BIOCSETF: libc::c_ulong = 0x80104267;
 const BIOCSRTIMEOUT: libc::c_ulong = 0x8010426D;
+
+const DLT_NULL: libc::c_uint = 0;
+const DLT_EN10MB: libc::c_uint = 1;
+const DLT_RAW: libc::c_uint = 12;
+const DLT_LOOP: libc::c_uint = 108;
 
 #[repr(C)]
 struct BpfHdr {
@@ -76,6 +83,25 @@ impl BpfBackend {
             return Err(SnifferError::Other("BIOCSHDRCMPLT failed".into()));
         }
 
+        let mut dlt: libc::c_uint = 0;
+        if unsafe { libc::ioctl(fd, BIOCGDLT, &mut dlt) } < 0 {
+            unsafe { libc::close(fd) };
+            return Err(SnifferError::Other("BIOCGDLT failed".into()));
+        }
+        let frame_kind = match dlt {
+            DLT_EN10MB => crate::packet::FrameKind::Ethernet,
+            DLT_NULL | DLT_LOOP => crate::packet::FrameKind::NullLoopback,
+            DLT_RAW => crate::packet::FrameKind::RawIp,
+            other => {
+                unsafe { libc::close(fd) };
+                return Err(SnifferError::Other(format!(
+                    "unsupported BPF datalink type {} on {}",
+                    other, ifname
+                )));
+            }
+        };
+        info!(dlt = dlt, ?frame_kind, "BPF datalink detected");
+
         let tv = libc::timeval {
             tv_sec: 0,
             tv_usec: 100_000,
@@ -85,11 +111,12 @@ impl BpfBackend {
             return Err(SnifferError::Other("BIOCSRTIMEOUT failed".into()));
         }
 
-        attach_bpf_filter(fd)?;
+        attach_bpf_filter(fd, frame_kind)?;
 
         let buf_len = buf_len as usize;
         Ok(BpfBackend {
             fd,
+            frame_kind,
             buf_len,
             read_buf: vec![0u8; buf_len],
             read_pos: 0,
@@ -99,7 +126,9 @@ impl BpfBackend {
 }
 
 impl RawBackend for BpfBackend {
-    fn frame_kind(&self) -> crate::packet::FrameKind { crate::packet::FrameKind::Ethernet }
+    fn frame_kind(&self) -> crate::packet::FrameKind {
+        self.frame_kind
+    }
 
     fn recv_frame(&mut self, buf: &mut [u8]) -> Result<usize, SnifferError> {
         loop {
@@ -114,9 +143,8 @@ impl RawBackend for BpfBackend {
                     if self.read_pos + hdr_len + cap_len <= self.read_len {
                         let frame_start = self.read_pos + hdr_len;
                         let copy_len = cap_len.min(buf.len());
-                        buf[..copy_len].copy_from_slice(
-                            &self.read_buf[frame_start..frame_start + copy_len],
-                        );
+                        buf[..copy_len]
+                            .copy_from_slice(&self.read_buf[frame_start..frame_start + copy_len]);
                         self.read_pos += total;
                         return Ok(copy_len);
                     }
@@ -157,13 +185,8 @@ impl RawBackend for BpfBackend {
     }
 
     fn send_frame(&mut self, frame: &[u8]) -> Result<(), SnifferError> {
-        let ret = unsafe {
-            libc::write(
-                self.fd,
-                frame.as_ptr() as *const libc::c_void,
-                frame.len(),
-            )
-        };
+        let ret =
+            unsafe { libc::write(self.fd, frame.as_ptr() as *const libc::c_void, frame.len()) };
         if ret < 0 {
             return Err(SnifferError::Inject(io::Error::last_os_error()));
         }
@@ -180,9 +203,7 @@ impl Drop for BpfBackend {
 fn open_bpf_device() -> Result<RawFd, SnifferError> {
     for i in 0..100 {
         let path = format!("/dev/bpf{}\0", i);
-        let fd = unsafe {
-            libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDWR)
-        };
+        let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDWR) };
         if fd >= 0 {
             info!(device = %format!("/dev/bpf{}", i), "opened BPF device");
             return Ok(fd);
@@ -206,7 +227,8 @@ fn get_interface_for(ip: IpAddr) -> Result<String, SnifferError> {
         .map_err(|e| SnifferError::Other(format!("bind UDP: {}", e)))?;
     sock.connect(&target)
         .map_err(|e| SnifferError::Other(format!("connect UDP: {}", e)))?;
-    let local_ip = sock.local_addr()
+    let local_ip = sock
+        .local_addr()
         .map_err(|e| SnifferError::Other(format!("local addr: {}", e)))?
         .ip();
 
@@ -215,7 +237,7 @@ fn get_interface_for(ip: IpAddr) -> Result<String, SnifferError> {
     for ifaddr in addrs {
         if let Some(addr) = ifaddr.address {
             let matches = match (addr.as_sockaddr_in(), addr.as_sockaddr_in6()) {
-                (Some(v4), _) => IpAddr::V4(v4.ip().into()) == local_ip,
+                (Some(v4), _) => IpAddr::V4(v4.ip()) == local_ip,
                 (_, Some(v6)) => IpAddr::V6(v6.ip()) == local_ip,
                 _ => false,
             };
@@ -231,7 +253,7 @@ fn get_interface_for(ip: IpAddr) -> Result<String, SnifferError> {
     )))
 }
 
-fn attach_bpf_filter(fd: RawFd) -> Result<(), SnifferError> {
+fn attach_bpf_filter(fd: RawFd, frame_kind: crate::packet::FrameKind) -> Result<(), SnifferError> {
     #[repr(C)]
     struct BpfInsn {
         code: u16,
@@ -240,20 +262,88 @@ fn attach_bpf_filter(fd: RawFd) -> Result<(), SnifferError> {
         k: u32,
     }
 
-    let filter: Vec<BpfInsn> = vec![
-        BpfInsn { code: 0x28, jt: 0, jf: 0, k: 0x0000000c },
-        BpfInsn { code: 0x15, jt: 0, jf: 2, k: 0x00000800 },
-        BpfInsn { code: 0x30, jt: 0, jf: 0, k: 0x00000017 },
-        BpfInsn { code: 0x15, jt: 6, jf: 7, k: 0x00000006 },
-        BpfInsn { code: 0x15, jt: 0, jf: 6, k: 0x000086dd },
-        BpfInsn { code: 0x30, jt: 0, jf: 0, k: 0x00000014 },
-        BpfInsn { code: 0x15, jt: 3, jf: 0, k: 0x00000006 },
-        BpfInsn { code: 0x15, jt: 0, jf: 3, k: 0x0000002c },
-        BpfInsn { code: 0x30, jt: 0, jf: 0, k: 0x00000036 },
-        BpfInsn { code: 0x15, jt: 0, jf: 1, k: 0x00000006 },
-        BpfInsn { code: 0x06, jt: 0, jf: 0, k: 0x00040000 },
-        BpfInsn { code: 0x06, jt: 0, jf: 0, k: 0x00000000 },
-    ];
+    let filter: Vec<BpfInsn> = match frame_kind {
+        crate::packet::FrameKind::Ethernet => vec![
+            BpfInsn {
+                code: 0x28,
+                jt: 0,
+                jf: 0,
+                k: 0x0000000c,
+            },
+            BpfInsn {
+                code: 0x15,
+                jt: 0,
+                jf: 2,
+                k: 0x00000800,
+            },
+            BpfInsn {
+                code: 0x30,
+                jt: 0,
+                jf: 0,
+                k: 0x00000017,
+            },
+            BpfInsn {
+                code: 0x15,
+                jt: 6,
+                jf: 7,
+                k: 0x00000006,
+            },
+            BpfInsn {
+                code: 0x15,
+                jt: 0,
+                jf: 6,
+                k: 0x000086dd,
+            },
+            BpfInsn {
+                code: 0x30,
+                jt: 0,
+                jf: 0,
+                k: 0x00000014,
+            },
+            BpfInsn {
+                code: 0x15,
+                jt: 3,
+                jf: 0,
+                k: 0x00000006,
+            },
+            BpfInsn {
+                code: 0x15,
+                jt: 0,
+                jf: 3,
+                k: 0x0000002c,
+            },
+            BpfInsn {
+                code: 0x30,
+                jt: 0,
+                jf: 0,
+                k: 0x00000036,
+            },
+            BpfInsn {
+                code: 0x15,
+                jt: 0,
+                jf: 1,
+                k: 0x00000006,
+            },
+            BpfInsn {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: 0x00040000,
+            },
+            BpfInsn {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: 0x00000000,
+            },
+        ],
+        crate::packet::FrameKind::NullLoopback | crate::packet::FrameKind::RawIp => vec![BpfInsn {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: 0x00040000,
+        }],
+    };
 
     #[repr(C)]
     struct BpfProgram {
@@ -270,6 +360,6 @@ fn attach_bpf_filter(fd: RawFd) -> Result<(), SnifferError> {
         return Err(SnifferError::FilterAttach(io::Error::last_os_error()));
     }
 
-    info!("BPF filter attached (TCP only)");
+    info!(?frame_kind, "BPF filter attached");
     Ok(())
 }

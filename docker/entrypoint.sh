@@ -3,13 +3,15 @@ set -e
 
 FAKE_SNI="${FAKE_SNI:-security.vercel.com}"
 PROXY_PORT="${PROXY_PORT:-1080}"
+SOCKS_PORT="${SOCKS_PORT:-1081}"
+XRAY_LOGLEVEL="${XRAY_LOGLEVEL:-warning}"
 LISTEN_PORT=40443
 
 if [ -z "$VLESS_URI" ]; then
     echo "ERROR: VLESS_URI environment variable is required"
     echo ""
     echo "Usage:"
-    echo "  docker run -d --cap-add=NET_RAW --cap-add=NET_ADMIN -p ${PROXY_PORT}:${PROXY_PORT} \\"
+    echo "  docker run -d --cap-add=NET_RAW --cap-add=NET_ADMIN -p ${PROXY_PORT}:${PROXY_PORT} -p ${SOCKS_PORT}:${SOCKS_PORT} \\"
     echo "    -e VLESS_URI='vless://uuid@server:443?...' \\"
     echo "    -e FAKE_SNI='${FAKE_SNI}' \\"
     echo "    sni-spoof-proxy"
@@ -66,18 +68,24 @@ echo "  Host: ${HOST}"
 echo "  Path: ${PATH_DEC}"
 echo "  Resolving: ${RESOLVE_HOST}"
 echo "  Fake SNI: ${FAKE_SNI}"
-echo "  Proxy port: ${PROXY_PORT}"
+echo "  HTTP/HTTPS proxy port: ${PROXY_PORT}"
+echo "  SOCKS5 proxy port: ${SOCKS_PORT}"
+echo "  Xray log level: ${XRAY_LOGLEVEL}"
 
-CONNECT_IP=$(getent hosts "$RESOLVE_HOST" 2>/dev/null | head -1 | awk '{print $1}')
-if [ -z "$CONNECT_IP" ]; then
-    CONNECT_IP=$(nslookup "$RESOLVE_HOST" 2>/dev/null | awk '/^Address: / { print $2 }' | head -1)
-fi
-if [ -z "$CONNECT_IP" ]; then
-    CONNECT_IP=$(dig +short "$RESOLVE_HOST" 2>/dev/null | head -1)
-fi
-if [ -z "$CONNECT_IP" ]; then
-    echo "ERROR: could not resolve ${RESOLVE_HOST}"
-    exit 1
+if echo "$RESOLVE_HOST" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+    CONNECT_IP="$RESOLVE_HOST"
+else
+    CONNECT_IP=$(getent hosts "$RESOLVE_HOST" 2>/dev/null | head -1 | awk '{print $1}')
+    if [ -z "$CONNECT_IP" ]; then
+        CONNECT_IP=$(nslookup "$RESOLVE_HOST" 2>/dev/null | awk '/^Address: / { print $2 }' | head -1)
+    fi
+    if [ -z "$CONNECT_IP" ]; then
+        CONNECT_IP=$(dig +short "$RESOLVE_HOST" 2>/dev/null | head -1)
+    fi
+    if [ -z "$CONNECT_IP" ]; then
+        echo "ERROR: could not resolve ${RESOLVE_HOST}"
+        exit 1
+    fi
 fi
 echo "  Resolved IP: ${CONNECT_IP}"
 
@@ -190,12 +198,24 @@ fi
 
 cat > /etc/xray/config.json << XRAYEOF
 {
+  "log": {
+    "loglevel": "${XRAY_LOGLEVEL}"
+  },
   "inbounds": [
     {
       "port": ${PROXY_PORT},
       "listen": "0.0.0.0",
       "protocol": "http",
       "settings": {}
+    },
+    {
+      "port": ${SOCKS_PORT},
+      "listen": "0.0.0.0",
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
     }
   ],
   "outbounds": [
@@ -228,12 +248,14 @@ echo "Starting sni-spoof-rs..."
 sni-spoof-rs /etc/sni-spoof-rs/config.json &
 sleep 1
 
-echo "Starting xray HTTP proxy on port ${PROXY_PORT}..."
+echo "Starting xray HTTP/HTTPS proxy on port ${PROXY_PORT} and SOCKS5 on port ${SOCKS_PORT}..."
 echo ""
 echo "============================================"
-echo "  Proxy ready on port ${PROXY_PORT}"
-echo "  Set HTTP proxy on your devices to:"
+echo "  Proxies ready"
+echo "  Set HTTP/HTTPS proxy on your devices to:"
 echo "    <this-machine-ip>:${PROXY_PORT}"
+echo "  Or set SOCKS5 proxy to:"
+echo "    <this-machine-ip>:${SOCKS_PORT}"
 echo "============================================"
 echo ""
 

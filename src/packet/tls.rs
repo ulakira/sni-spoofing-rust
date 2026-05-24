@@ -1,4 +1,5 @@
 use rand::RngCore;
+use std::sync::LazyLock;
 
 const TPL_HEX: &str = "1603010200010001fc030341d5b549d9cd1adfa7296c8418d157dc7b624c842824ff493b9375bb48d34f2b20bf018bcc90a7c89a230094815ad0c15b736e38c01209d72d282cb5e2105328150024130213031301c02cc030c02bc02fcca9cca8c024c028c023c027009f009e006b006700ff0100018f0000000b00090000066d63692e6972000b000403000102000a00160014001d0017001e0019001801000101010201030104002300000010000e000c02683208687474702f312e310016000000170000000d002a0028040305030603080708080809080a080b080408050806040105010601030303010302040205020602002b00050403040303002d00020101003300260024001d0020435bacc4d05f9d41fef44ab3ad55616c36e0613473e2338770efdaa98693d217001500d5";
 
@@ -6,20 +7,21 @@ const TEMPLATE_SNI: &[u8] = b"mci.ir";
 
 pub const CLIENT_HELLO_SIZE: usize = 517;
 
-fn template_bytes() -> Vec<u8> {
-    hex::decode(TPL_HEX).expect("invalid template hex")
+static TEMPLATE_BYTES: LazyLock<Vec<u8>> =
+    LazyLock::new(|| hex::decode(TPL_HEX).expect("invalid template hex"));
+
+fn template_bytes() -> &'static [u8] {
+    &TEMPLATE_BYTES
 }
 
 mod hex {
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return Err("odd length".into());
         }
         (0..s.len())
             .step_by(2)
-            .map(|i| {
-                u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string())
-            })
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
             .collect()
     }
 }
@@ -69,7 +71,12 @@ pub fn build_client_hello(sni: &str) -> Vec<u8> {
     out.extend_from_slice(&(pad_len as u16).to_be_bytes());
     out.extend_from_slice(&vec![0x00; pad_len]);
 
-    assert_eq!(out.len(), CLIENT_HELLO_SIZE, "ClientHello size mismatch: got {}", out.len());
+    assert_eq!(
+        out.len(),
+        CLIENT_HELLO_SIZE,
+        "ClientHello size mismatch: got {}",
+        out.len()
+    );
     out
 }
 

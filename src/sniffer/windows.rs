@@ -40,18 +40,20 @@ impl WinDivertBackend {
         info!(filter = %filter_str, "opening WinDivert handles");
 
         let sniff_flags = WinDivertFlags::new().set_sniff().set_recv_only();
-        let sniff_handle = WinDivert::network(
-            &filter_str,
-            0i16,
-            sniff_flags,
-        ).map_err(|e| SnifferError::SocketOpen(io::Error::new(io::ErrorKind::Other, format!("sniff handle: {}", e))))?;
+        let sniff_handle = WinDivert::network(&filter_str, 0i16, sniff_flags).map_err(|e| {
+            SnifferError::SocketOpen(io::Error::new(
+                io::ErrorKind::Other,
+                format!("sniff handle: {}", e),
+            ))
+        })?;
 
         let inject_flags = WinDivertFlags::new().set_send_only();
-        let inject_handle = WinDivert::network(
-            "false",
-            0i16,
-            inject_flags,
-        ).map_err(|e| SnifferError::SocketOpen(io::Error::new(io::ErrorKind::Other, format!("inject handle: {}", e))))?;
+        let inject_handle = WinDivert::network("false", 0i16, inject_flags).map_err(|e| {
+            SnifferError::SocketOpen(io::Error::new(
+                io::ErrorKind::Other,
+                format!("inject handle: {}", e),
+            ))
+        })?;
 
         let (packet_tx, packet_rx) = mpsc::sync_channel(128);
         thread::spawn(move || {
@@ -77,18 +79,28 @@ impl WinDivertBackend {
 }
 
 impl RawBackend for WinDivertBackend {
-    fn frame_kind(&self) -> crate::packet::FrameKind { crate::packet::FrameKind::RawIp }
+    fn frame_kind(&self) -> crate::packet::FrameKind {
+        crate::packet::FrameKind::RawIp
+    }
 
-    fn skip_checksum_on_send(&self) -> bool { false }
+    fn skip_checksum_on_send(&self) -> bool {
+        false
+    }
 
     fn recv_frame(&mut self, buf: &mut [u8]) -> Result<usize, SnifferError> {
         let data = match self.packet_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(packet) => packet,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                return Err(SnifferError::Recv(io::Error::new(io::ErrorKind::TimedOut, "recv timeout")));
+                return Err(SnifferError::Recv(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "recv timeout",
+                )));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(SnifferError::Recv(io::Error::new(io::ErrorKind::BrokenPipe, "sniff thread stopped")));
+                return Err(SnifferError::Recv(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "sniff thread stopped",
+                )));
             }
         };
 
@@ -101,8 +113,9 @@ impl RawBackend for WinDivertBackend {
         let mut packet = unsafe { WinDivertPacket::<NetworkLayer>::new(frame.to_vec()) };
         packet.address.set_outbound(true);
         let _ = packet.recalculate_checksums(Default::default());
-        self.inject_handle.send(&packet)
-            .map_err(|e| SnifferError::Inject(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+        self.inject_handle.send(&packet).map_err(|e| {
+            SnifferError::Inject(io::Error::new(io::ErrorKind::Other, e.to_string()))
+        })?;
         Ok(())
     }
 }

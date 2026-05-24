@@ -11,14 +11,57 @@ use crate::packet::tls;
 use crate::proto::{ConnId, Deregistration, Registration, SnifferCommand, SnifferResult};
 use crate::relay;
 
+struct SnifferRegistrationGuard {
+    cmd_tx: std::sync::mpsc::Sender<SnifferCommand>,
+    conn_id: ConnId,
+}
+
+impl SnifferRegistrationGuard {
+    fn new(cmd_tx: &std::sync::mpsc::Sender<SnifferCommand>, conn_id: ConnId) -> Self {
+        Self {
+            cmd_tx: cmd_tx.clone(),
+            conn_id,
+        }
+    }
+}
+
+impl Drop for SnifferRegistrationGuard {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.send(SnifferCommand::Deregister(Deregistration {
+            conn_id: self.conn_id,
+        }));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_connection(
     client: TcpStream,
     upstream_addr: SocketAddr,
     fake_sni: String,
     local_ip: std::net::IpAddr,
     cmd_tx: std::sync::mpsc::Sender<SnifferCommand>,
+    conn_timeout_sec: u64,
+    handshake_timeout_sec: u64,
+    keepalive_time_sec: u64,
+    keepalive_interval_sec: u64,
+    idle_timeout: Option<u64>,
+    buffer_size: usize,
 ) {
-    if let Err(e) = handle_inner(client, upstream_addr, &fake_sni, local_ip, &cmd_tx).await {
+    if let Err(e) = handle_inner(
+        client,
+        upstream_addr,
+        &fake_sni,
+        local_ip,
+        &cmd_tx,
+        conn_timeout_sec,
+        handshake_timeout_sec,
+        keepalive_time_sec,
+        keepalive_interval_sec,
+        idle_timeout,
+        buffer_size,
+    )
+    .await
+    {
         match &e {
             HandlerError::Timeout => {
                 warn!(upstream = %upstream_addr, "timeout waiting for fake ACK");
@@ -30,12 +73,19 @@ pub async fn handle_connection(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_inner(
     client: TcpStream,
     upstream_addr: SocketAddr,
     fake_sni: &str,
     local_ip: std::net::IpAddr,
     cmd_tx: &std::sync::mpsc::Sender<SnifferCommand>,
+    conn_timeout_sec: u64,
+    handshake_timeout_sec: u64,
+    keepalive_time_sec: u64,
+    keepalive_interval_sec: u64,
+    idle_timeout: Option<u64>,
+    buffer_size: usize,
 ) -> Result<(), HandlerError> {
     let fake_payload = tls::build_client_hello(fake_sni);
 
@@ -54,7 +104,9 @@ async fn handle_inner(
     }
     .map_err(HandlerError::Connect)?;
 
-    upstream_sock.set_nonblocking(true).map_err(HandlerError::Connect)?;
+    upstream_sock
+        .set_nonblocking(true)
+        .map_err(HandlerError::Connect)?;
 
     let bind_addr: SocketAddr = if upstream_addr.is_ipv4() {
         "0.0.0.0:0".parse().unwrap()
@@ -69,10 +121,9 @@ async fn handle_inner(
         .local_addr()
         .map_err(HandlerError::Connect)?
         .as_socket()
-        .ok_or_else(|| HandlerError::Connect(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "failed to get local socket addr",
-        )))?;
+        .ok_or_else(|| {
+            HandlerError::Connect(std::io::Error::other("failed to get local socket addr"))
+        })?;
 
     let (result_tx, mut result_rx) = mpsc::channel::<SnifferResult>(4);
 
@@ -93,37 +144,33 @@ async fn handle_inner(
         }))
         .map_err(|_| HandlerError::Registration)?;
 
-    let _ = registered_rx.await;
+    let _registration_guard = SnifferRegistrationGuard::new(cmd_tx, conn_id);
+    registered_rx
+        .await
+        .map_err(|_| HandlerError::Registration)?;
 
     match upstream_sock.connect(&upstream_addr.into()) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
         #[cfg(unix)]
         Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
-        Err(e) => {
-            let _ = cmd_tx.send(SnifferCommand::Deregister(Deregistration { conn_id }));
-            return Err(HandlerError::Connect(e));
-        }
+        Err(e) => return Err(HandlerError::Connect(e)),
     }
 
     let std_stream: std::net::TcpStream = upstream_sock.into();
     let upstream = TcpStream::from_std(std_stream).map_err(HandlerError::Connect)?;
 
-    let connect_result = tokio::time::timeout(Duration::from_secs(5), upstream.writable()).await;
+    let connect_result =
+        tokio::time::timeout(Duration::from_secs(conn_timeout_sec), upstream.writable()).await;
     match connect_result {
         Ok(Ok(())) => {
             let sock_ref = SockRef::from(&upstream);
             if let Some(err) = sock_ref.take_error().map_err(HandlerError::Connect)? {
-                let _ = cmd_tx.send(SnifferCommand::Deregister(Deregistration { conn_id }));
                 return Err(HandlerError::Connect(err));
             }
         }
-        Ok(Err(e)) => {
-            let _ = cmd_tx.send(SnifferCommand::Deregister(Deregistration { conn_id }));
-            return Err(HandlerError::Connect(e));
-        }
+        Ok(Err(e)) => return Err(HandlerError::Connect(e)),
         Err(_) => {
-            let _ = cmd_tx.send(SnifferCommand::Deregister(Deregistration { conn_id }));
             return Err(HandlerError::Connect(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "connect timeout",
@@ -132,24 +179,25 @@ async fn handle_inner(
     }
 
     let keepalive = TcpKeepalive::new()
-        .with_time(Duration::from_secs(11))
-        .with_interval(Duration::from_secs(2));
+        .with_time(Duration::from_secs(keepalive_time_sec))
+        .with_interval(Duration::from_secs(keepalive_interval_sec));
     let sock_ref = SockRef::from(&upstream);
     let _ = sock_ref.set_tcp_keepalive(&keepalive);
 
     let client_ref = SockRef::from(&client);
     let _ = client_ref.set_tcp_keepalive(&keepalive);
 
-    debug!(port = local_addr.port(), "connected, waiting for sniffer confirmation");
+    debug!(
+        port = local_addr.port(),
+        "connected, waiting for sniffer confirmation"
+    );
 
-    let confirmed = tokio::time::timeout(Duration::from_secs(2), async {
-        while let Some(result) = result_rx.recv().await {
-            match result {
-                SnifferResult::FakeConfirmed => return Ok(()),
-                SnifferResult::Failed(e) => return Err(HandlerError::SnifferFailed(e)),
-            }
+    let confirmed = tokio::time::timeout(Duration::from_secs(handshake_timeout_sec), async {
+        match result_rx.recv().await {
+            Some(SnifferResult::FakeConfirmed) => Ok(()),
+            Some(SnifferResult::Failed(e)) => Err(HandlerError::SnifferFailed(e)),
+            None => Err(HandlerError::Registration),
         }
-        Err(HandlerError::Registration)
     })
     .await;
 
@@ -161,5 +209,7 @@ async fn handle_inner(
 
     info!(port = local_addr.port(), "fake confirmed, starting relay");
 
-    relay::relay(client, upstream).await.map_err(HandlerError::Relay)
+    relay::relay(client, upstream, idle_timeout, buffer_size)
+        .await
+        .map_err(HandlerError::Relay)
 }

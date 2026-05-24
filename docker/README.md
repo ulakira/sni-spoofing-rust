@@ -1,6 +1,6 @@
 # Docker Proxy
 
-Run sni-spoof-rs as a shared HTTP proxy. One machine runs the container, all devices on the network connect through it.
+Run sni-spoof-rs as shared HTTP/HTTPS and SOCKS5 proxies. One machine runs the container, all devices on the network connect through it.
 
 **[English](#usage)** | **[Persian](#%D8%B1%D8%A7%D9%87%D9%86%D9%85%D8%A7)** 
 
@@ -19,6 +19,7 @@ docker build -f docker/Dockerfile -t sni-spoof-proxy .
 docker run -d --name snispoof \
   --cap-add=NET_RAW --cap-add=NET_ADMIN \
   -p 1080:1080 \
+  -p 1081:1081 \
   -e VLESS_URI='vless://your-uuid@server.com:443?security=tls&sni=server.com&type=ws&host=server.com&path=/path' \
   -e FAKE_SNI='security.vercel.com' \
   sni-spoof-proxy
@@ -39,6 +40,7 @@ Settings > WiFi > tap your network > Configure Proxy > Manual
 Settings > WiFi > long press your network > Modify > Advanced > Proxy > Manual
 - Proxy hostname: your host machine's IP
 - Proxy port: `1080`
+- For SOCKS5-capable apps, use the same host and port `1081`
 
 **Mac/Linux/Windows:**
 ```bash
@@ -54,7 +56,8 @@ Or set it in your browser's proxy settings.
 |---|---|---|
 | `VLESS_URI` | (required) | Your full `vless://...` link |
 | `FAKE_SNI` | `security.vercel.com` | SNI for the fake packet |
-| `PROXY_PORT` | `1080` | HTTP proxy port to expose |
+| `PROXY_PORT` | `1080` | HTTP/HTTPS proxy port to expose |
+| `SOCKS_PORT` | `1081` | SOCKS5 proxy port to expose |
 
 ### Supported transport types
 
@@ -67,6 +70,12 @@ curl -x http://127.0.0.1:1080 https://icanhazip.com
 ```
 
 Should return your remote server's IP, not your real IP.
+
+SOCKS5 check:
+
+```bash
+curl --socks5-hostname 127.0.0.1:1081 https://icanhazip.com
+```
 
 ### Logs
 
@@ -99,6 +108,7 @@ docker build -f docker/Dockerfile -t sni-spoof-proxy .
 docker run -d --name snispoof \
   --cap-add=NET_RAW --cap-add=NET_ADMIN \
   -p 1080:1080 \
+  -p 1081:1081 \
   -e VLESS_URI='vless://لینک-کامل-شما' \
   -e FAKE_SNI='security.vercel.com' \
   sni-spoof-proxy

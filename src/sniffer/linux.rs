@@ -5,8 +5,8 @@ use std::os::fd::RawFd;
 
 use tracing::info;
 
-use crate::error::SnifferError;
 use super::RawBackend;
+use crate::error::SnifferError;
 
 pub struct AfPacketBackend {
     fd: RawFd,
@@ -68,7 +68,9 @@ impl AfPacketBackend {
 }
 
 impl RawBackend for AfPacketBackend {
-    fn frame_kind(&self) -> crate::packet::FrameKind { crate::packet::FrameKind::Ethernet }
+    fn frame_kind(&self) -> crate::packet::FrameKind {
+        crate::packet::FrameKind::Ethernet
+    }
 
     fn recv_frame(&mut self, buf: &mut [u8]) -> Result<usize, SnifferError> {
         let n = unsafe {
@@ -130,7 +132,8 @@ fn get_interface_for(ip: IpAddr) -> Result<(String, i32), SnifferError> {
         .map_err(|e| SnifferError::Other(format!("bind UDP: {}", e)))?;
     sock.connect(&target)
         .map_err(|e| SnifferError::Other(format!("connect UDP to {}: {}", target, e)))?;
-    let local_ip = sock.local_addr()
+    let local_ip = sock
+        .local_addr()
         .map_err(|e| SnifferError::Other(format!("local addr: {}", e)))?
         .ip();
 
@@ -139,7 +142,7 @@ fn get_interface_for(ip: IpAddr) -> Result<(String, i32), SnifferError> {
     for ifaddr in addrs {
         if let Some(addr) = ifaddr.address {
             let matches = match (addr.as_sockaddr_in(), addr.as_sockaddr_in6()) {
-                (Some(v4), _) => IpAddr::V4(v4.ip().into()) == local_ip,
+                (Some(v4), _) => IpAddr::V4(v4.ip()) == local_ip,
                 (_, Some(v6)) => IpAddr::V6(v6.ip()) == local_ip,
                 _ => false,
             };
@@ -160,18 +163,78 @@ fn get_interface_for(ip: IpAddr) -> Result<(String, i32), SnifferError> {
 
 fn attach_bpf_filter(fd: RawFd, _upstreams: &[SocketAddr]) -> Result<(), SnifferError> {
     let filter: Vec<libc::sock_filter> = vec![
-        libc::sock_filter { code: 0x28, jt: 0, jf: 0, k: 0x0000000c },
-        libc::sock_filter { code: 0x15, jt: 0, jf: 2, k: 0x00000800 },
-        libc::sock_filter { code: 0x30, jt: 0, jf: 0, k: 0x00000017 },
-        libc::sock_filter { code: 0x15, jt: 6, jf: 7, k: 0x00000006 },
-        libc::sock_filter { code: 0x15, jt: 0, jf: 6, k: 0x000086dd },
-        libc::sock_filter { code: 0x30, jt: 0, jf: 0, k: 0x00000014 },
-        libc::sock_filter { code: 0x15, jt: 3, jf: 0, k: 0x00000006 },
-        libc::sock_filter { code: 0x15, jt: 0, jf: 3, k: 0x0000002c },
-        libc::sock_filter { code: 0x30, jt: 0, jf: 0, k: 0x00000036 },
-        libc::sock_filter { code: 0x15, jt: 0, jf: 1, k: 0x00000006 },
-        libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x00040000 },
-        libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x00000000 },
+        libc::sock_filter {
+            code: 0x28,
+            jt: 0,
+            jf: 0,
+            k: 0x0000000c,
+        },
+        libc::sock_filter {
+            code: 0x15,
+            jt: 0,
+            jf: 2,
+            k: 0x00000800,
+        },
+        libc::sock_filter {
+            code: 0x30,
+            jt: 0,
+            jf: 0,
+            k: 0x00000017,
+        },
+        libc::sock_filter {
+            code: 0x15,
+            jt: 6,
+            jf: 7,
+            k: 0x00000006,
+        },
+        libc::sock_filter {
+            code: 0x15,
+            jt: 0,
+            jf: 6,
+            k: 0x000086dd,
+        },
+        libc::sock_filter {
+            code: 0x30,
+            jt: 0,
+            jf: 0,
+            k: 0x00000014,
+        },
+        libc::sock_filter {
+            code: 0x15,
+            jt: 3,
+            jf: 0,
+            k: 0x00000006,
+        },
+        libc::sock_filter {
+            code: 0x15,
+            jt: 0,
+            jf: 3,
+            k: 0x0000002c,
+        },
+        libc::sock_filter {
+            code: 0x30,
+            jt: 0,
+            jf: 0,
+            k: 0x00000036,
+        },
+        libc::sock_filter {
+            code: 0x15,
+            jt: 0,
+            jf: 1,
+            k: 0x00000006,
+        },
+        libc::sock_filter {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: 0x00040000,
+        },
+        libc::sock_filter {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: 0x00000000,
+        },
     ];
 
     let prog = libc::sock_fprog {

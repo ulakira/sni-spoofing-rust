@@ -5,7 +5,7 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,14 +14,16 @@ use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
-use crate::packet::{FrameKind, IpVersion, detect_ip_version, ipv4, ipv6, tcp};
+use crate::packet::{detect_ip_version, ipv4, ipv6, tcp, FrameKind, IpVersion};
 use crate::proto::{ConnId, SnifferCommand, SnifferResult};
 
 pub trait RawBackend: Send + 'static {
     fn recv_frame(&mut self, buf: &mut [u8]) -> Result<usize, crate::error::SnifferError>;
     fn send_frame(&mut self, frame: &[u8]) -> Result<(), crate::error::SnifferError>;
     fn frame_kind(&self) -> FrameKind;
-    fn skip_checksum_on_send(&self) -> bool { false }
+    fn skip_checksum_on_send(&self) -> bool {
+        false
+    }
 }
 
 struct ConnState {
@@ -45,9 +47,7 @@ fn build_fake_frame(
             let ihl = ipv4::header_len(&template[link_len..]);
             (ihl, link_len + ihl)
         }
-        IpVersion::V6 => {
-            (ipv6::IPV6_HEADER_LEN, link_len + ipv6::IPV6_HEADER_LEN)
-        }
+        IpVersion::V6 => (ipv6::IPV6_HEADER_LEN, link_len + ipv6::IPV6_HEADER_LEN),
     };
 
     let tcp_hdr_len = tcp::data_offset(&template[tcp_off..]);
@@ -103,7 +103,7 @@ struct ParsedPacket {
 
 fn parse_frame(
     frame: &[u8],
-    local_ips: &[IpAddr],
+    local_ips: &HashSet<IpAddr>,
     upstream_addrs: &HashMap<(IpAddr, u16), ()>,
     frame_kind: FrameKind,
 ) -> Option<ParsedPacket> {
@@ -188,6 +188,7 @@ pub fn run_sniffer(
     upstream_addrs: Vec<(IpAddr, u16)>,
     stop: Arc<AtomicBool>,
 ) {
+    let local_ips_set: HashSet<IpAddr> = local_ips.into_iter().collect();
     let upstream_set: HashMap<(IpAddr, u16), ()> =
         upstream_addrs.iter().map(|a| (*a, ())).collect();
     let frame_kind = backend.frame_kind();
@@ -197,7 +198,10 @@ pub fn run_sniffer(
     let mut connections: HashMap<ConnId, ConnState> = HashMap::new();
     let mut buf = vec![0u8; 65536];
 
-    info!("sniffer thread started, monitoring {} upstream(s)", upstream_addrs.len());
+    info!(
+        "sniffer thread started, monitoring {} upstream(s)",
+        upstream_addrs.len()
+    );
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -214,13 +218,16 @@ pub fn run_sniffer(
                         "registered connection"
                     );
                     let registered_tx = reg.registered_tx;
-                    connections.insert(reg.conn_id, ConnState {
-                        isn: None,
-                        server_isn: None,
-                        fake_payload: reg.fake_payload,
-                        fake_injected: false,
-                        result_tx: reg.result_tx,
-                    });
+                    connections.insert(
+                        reg.conn_id,
+                        ConnState {
+                            isn: None,
+                            server_isn: None,
+                            fake_payload: reg.fake_payload,
+                            fake_injected: false,
+                            result_tx: reg.result_tx,
+                        },
+                    );
                     let _ = registered_tx.send(());
                 }
                 Ok(SnifferCommand::Deregister(dereg)) => {
@@ -254,7 +261,7 @@ pub fn run_sniffer(
         };
 
         let frame = &buf[..n];
-        let parsed = match parse_frame(frame, &local_ips, &upstream_set, frame_kind) {
+        let parsed = match parse_frame(frame, &local_ips_set, &upstream_set, frame_kind) {
             Some(p) => p,
             None => continue,
         };
@@ -277,7 +284,11 @@ pub fn run_sniffer(
 
         if parsed.is_outbound {
             if fl & tcp::SYN != 0 && fl & tcp::ACK == 0 && plen == 0 {
-                debug!(port = parsed.outbound_id.src_port, isn = seq, "SYN captured");
+                debug!(
+                    port = parsed.outbound_id.src_port,
+                    isn = seq,
+                    "SYN captured"
+                );
                 conn.isn = Some(seq);
                 continue;
             }
@@ -292,22 +303,31 @@ pub fn run_sniffer(
                         continue;
                     }
                     conn.fake_injected = true;
-                    debug!(port = parsed.outbound_id.src_port, "3rd ACK captured, injecting fake");
+                    debug!(
+                        port = parsed.outbound_id.src_port,
+                        "3rd ACK captured, injecting fake"
+                    );
 
                     let fake_frame = build_fake_frame(
-                        frame, isn, &conn.fake_payload, parsed.ip_version, link_len, skip_checksum,
+                        frame,
+                        isn,
+                        &conn.fake_payload,
+                        parsed.ip_version,
+                        link_len,
+                        skip_checksum,
                     );
                     thread::sleep(Duration::from_millis(1));
 
                     if let Err(e) = backend.send_frame(&fake_frame) {
                         warn!(port = parsed.outbound_id.src_port, "inject failed: {}", e);
-                        let _ = conn.result_tx.blocking_send(SnifferResult::Failed(
-                            format!("inject failed: {}", e),
-                        ));
+                        let _ = conn
+                            .result_tx
+                            .blocking_send(SnifferResult::Failed(format!("inject failed: {}", e)));
                         connections.remove(&parsed.outbound_id);
                     } else {
-                        let fake_seq =
-                            isn.wrapping_add(1).wrapping_sub(conn.fake_payload.len() as u32);
+                        let fake_seq = isn
+                            .wrapping_add(1)
+                            .wrapping_sub(conn.fake_payload.len() as u32);
                         info!(
                             port = parsed.outbound_id.src_port,
                             fake_seq = fake_seq,
@@ -352,10 +372,13 @@ pub fn run_sniffer(
             }
 
             if fl & tcp::RST != 0 {
-                warn!(port = parsed.outbound_id.src_port, "RST received from server");
-                let _ = conn.result_tx.blocking_send(SnifferResult::Failed(
-                    "RST from server".into(),
-                ));
+                warn!(
+                    port = parsed.outbound_id.src_port,
+                    "RST received from server"
+                );
+                let _ = conn
+                    .result_tx
+                    .blocking_send(SnifferResult::Failed("RST from server".into()));
                 connections.remove(&parsed.outbound_id);
                 continue;
             }

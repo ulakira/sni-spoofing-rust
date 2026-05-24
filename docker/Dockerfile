@@ -1,7 +1,8 @@
-FROM rust:1.82-bookworm AS builder
+FROM rust:bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
+COPY data/ data/
 RUN cargo build --release
 
 FROM debian:bookworm-slim
@@ -27,7 +28,8 @@ RUN chmod +x /entrypoint.sh
 
 ENV FAKE_SNI=security.vercel.com
 ENV PROXY_PORT=1080
+ENV SOCKS_PORT=1081
 
-EXPOSE 1080
+EXPOSE 1080 1081
 
 ENTRYPOINT ["/entrypoint.sh"]
